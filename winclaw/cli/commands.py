@@ -94,14 +94,6 @@ def _init_prompt_session() -> None:
     """Create the prompt_toolkit session with persistent file history."""
     global _PROMPT_SESSION, _SAVED_TERM_ATTRS
 
-    # Save terminal state so we can restore it on exit
-    try:
-        import termios
-
-        _SAVED_TERM_ATTRS = termios.tcgetattr(sys.stdin.fileno())
-    except Exception:
-        pass
-
     history_file = Path.home() / ".winclaw" / "history" / "cli_history"
     history_file.parent.mkdir(parents=True, exist_ok=True)
 
@@ -215,16 +207,9 @@ def onboard():
 
 def _make_provider(config: Config):
     """Create the appropriate LLM provider from config."""
-    from winclaw.providers.azure_openai_provider import AzureOpenAIProvider
-    from winclaw.providers.openai_codex_provider import OpenAICodexProvider
-
     model = config.agents.defaults.model
     provider_name = config.get_provider_name(model)
     p = config.get_provider(model)
-
-    # OpenAI Codex (OAuth)
-    if provider_name == "openai_codex" or model.startswith("openai-codex/"):
-        return OpenAICodexProvider(default_model=model)
 
     # Custom: direct OpenAI-compatible endpoint, bypasses LiteLLM
     from winclaw.providers.custom_provider import CustomProvider
@@ -233,20 +218,6 @@ def _make_provider(config: Config):
         return CustomProvider(
             api_key=p.api_key if p else "no-key",
             api_base=config.get_api_base(model) or "http://localhost:8000/v1",
-            default_model=model,
-        )
-
-    # Azure OpenAI: direct Azure OpenAI endpoint with deployment name
-    if provider_name == "azure_openai":
-        if not p or not p.api_key or not p.api_base:
-            console.print("[red]Error: Azure OpenAI requires api_key and api_base.[/red]")
-            console.print("Set them in ~/.winclaw/config.json under providers.azure_openai section")
-            console.print("Use the model field to specify the deployment name.")
-            raise typer.Exit(1)
-
-        return AzureOpenAIProvider(
-            api_key=p.api_key,
-            api_base=p.api_base,
             default_model=model,
         )
 
@@ -283,7 +254,6 @@ def gateway(
     """Start the winclaw gateway."""
     from winclaw.agent.loop import AgentLoop
     from winclaw.bus.queue import MessageBus
-    from winclaw.channels.manager import ChannelManager
     from winclaw.config.loader import load_config
     from winclaw.cron.service import CronService
     from winclaw.cron.types import CronJob
@@ -335,8 +305,8 @@ def gateway(
     # Set cron callback (needs agent)
     async def on_cron_job(job: CronJob) -> str | None:
         """Execute a cron job through the agent."""
-        from winclaw.agent.tools.cron import CronTool
-        from winclaw.agent.tools.message import MessageTool
+        from winclaw.tools.cron import CronTool
+        from winclaw.tools.message import MessageTool
 
         reminder_note = (
             "[Scheduled Task] Timer finished.\n\n"

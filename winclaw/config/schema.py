@@ -157,7 +157,7 @@ class ChannelsConfig(Base):
 class AgentDefaults(Base):
     """Default agent configuration."""
 
-    workspace: str = Path().home / ".winclaw"
+    workspace: Path = Field(default_factory=lambda: Path.home() / ".winclaw")
     model: str = "openai/gpt-5.4"
     provider: str = (
         "auto"  # Provider name (e.g. "anthropic", "openrouter") or "auto" for auto-detection

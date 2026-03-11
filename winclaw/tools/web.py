@@ -11,6 +11,7 @@ import httpx
 from loguru import logger
 from readability import Document
 
+from winclaw.config.loader import get_config_path
 from winclaw.tools.base import Tool
 
 # Shared constants
@@ -59,7 +60,9 @@ class WebSearchTool(Tool):
         "required": ["query"],
     }
 
-    def __init__(self, api_key: Optional[str] = None, max_results: int = 5, proxy: Optional[str] = None):
+    def __init__(
+        self, api_key: Optional[str] = None, max_results: int = 5, proxy: Optional[str] = None
+    ):
         self._init_api_key = api_key
         self.max_results = max_results
         self.proxy = proxy
@@ -72,8 +75,8 @@ class WebSearchTool(Tool):
     async def execute(self, query: str, count: Optional[int] = None, **kwargs: Any) -> str:
         if not self.api_key:
             return (
-                "Error: Brave Search API key not configured. Set it in "
-                "~/.winclaw/config.json under tools.web.search.apiKey "
+                f"Error: Brave Search API key not configured. Set it in "
+                f"{get_config_path()} under tools.web.search.apiKey "
                 "(or export BRAVE_API_KEY), then restart the gateway."
             )
 
