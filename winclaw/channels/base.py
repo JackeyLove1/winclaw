@@ -7,6 +7,7 @@ from loguru import logger
 
 from winclaw.bus.events import InboundMessage, OutboundMessage
 from winclaw.bus.queue import MessageBus
+from winclaw.utils.helpers import get_new_session_id
 
 
 class BaseChannel(ABC):
@@ -76,7 +77,7 @@ class BaseChannel(ABC):
         content: str,
         media: list[str] | None = None,
         metadata: dict[str, Any] | None = None,
-        session_key: str | None = None,
+        session_id: str | None = None,
     ) -> None:
         """
         Handle an incoming message from the chat platform.
@@ -89,7 +90,7 @@ class BaseChannel(ABC):
             content: Message text content.
             media: Optional list of media URLs.
             metadata: Optional channel-specific metadata.
-            session_key: Optional session key override (e.g. thread-scoped sessions).
+            session_id: Optional session ID override (e.g. thread-scoped sessions).
         """
         if not self.is_allowed(sender_id):
             logger.warning(
@@ -101,6 +102,7 @@ class BaseChannel(ABC):
             return
 
         msg = InboundMessage(
+            session_id=session_id or get_new_session_id(),
             channel=self.name,
             sender_id=str(sender_id),
             chat_id=str(chat_id),

@@ -18,12 +18,6 @@ class InboundMessage:
     channel: Optional[str] = None  # telegram, discord, slack, whatsapp
     chat_id: Optional[str] = None  # Chat/channel identifier
 
-    @property
-    def session_key(self) -> str:
-        """Unique key for session identification."""
-        return self.session_id or f"{self.channel}:{self.chat_id}"
-
-
 @dataclass
 class OutboundMessage:
     """Message to send to a chat channel."""
@@ -36,7 +30,3 @@ class OutboundMessage:
     chat_id: Optional[str] = None
     reply_to: Optional[str] = None
 
-    @property
-    def session_key(self) -> str:
-        """Unique key for session identification."""
-        return self.session_id or f"{self.channel}:{self.chat_id}"

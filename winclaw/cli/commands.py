@@ -329,7 +329,7 @@ def gateway(
         try:
             response = await agent.process_direct(
                 reminder_note,
-                session_key=f"cron:{job.id}",
+                session_id=f"cron:{job.id}",
                 channel=job.payload.channel or "cli",
                 chat_id=job.payload.to or "direct",
             )
@@ -346,6 +346,7 @@ def gateway(
 
             await bus.publish_outbound(
                 OutboundMessage(
+                    session_id=f"{job.payload.channel or 'cli'}:{job.payload.to}",
                     channel=job.payload.channel or "cli", chat_id=job.payload.to, content=response
                 )
             )
@@ -383,7 +384,7 @@ def gateway(
 
         return await agent.process_direct(
             tasks,
-            session_key="heartbeat",
+            session_id="heartbeat",
             channel=channel,
             chat_id=chat_id,
             on_progress=_silent,
@@ -397,7 +398,12 @@ def gateway(
         if channel == "cli":
             return  # No external channel available to deliver to
         await bus.publish_outbound(
-            OutboundMessage(channel=channel, chat_id=chat_id, content=response)
+            OutboundMessage(
+                session_id=f"{channel}:{chat_id}",
+                channel=channel,
+                chat_id=chat_id,
+                content=response,
+            )
         )
 
     hb_cfg = config.gateway.heartbeat
@@ -527,7 +533,9 @@ def agent(
             logger.debug(f"Running once,session_id:{session_id} message:{message}")
             with _thinking_ctx():
                 response = await agent_loop.process_direct(
-                    content=message, on_progress=_cli_progress
+                    content=message,
+                    session_id=session_id,
+                    on_progress=_cli_progress,
                 )
             _print_agent_response(response, render_markdown=markdown)
             await agent_loop.close_mcp()
@@ -615,6 +623,7 @@ def agent(
 
                         await bus.publish_inbound(
                             InboundMessage(
+                                session_id=session_id,
                                 channel=cli_channel,
                                 sender_id="user",
                                 chat_id=cli_chat_id,

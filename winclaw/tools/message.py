@@ -84,6 +84,7 @@ class MessageTool(Tool):
             return "Error: Message sending not configured"
 
         msg = OutboundMessage(
+            session_id=f"{channel}:{chat_id}",
             channel=channel,
             chat_id=chat_id,
             content=content,

@@ -49,7 +49,7 @@ class SubagentManager:
         self.exec_config = exec_config or ExecToolConfig()
         self.restrict_to_workspace = restrict_to_workspace
         self._running_tasks: dict[str, asyncio.Task[None]] = {}
-        self._session_tasks: dict[str, set[str]] = {}  # session_key -> {task_id, ...}
+        self._session_tasks: dict[str, set[str]] = {}  # session_id -> {task_id, ...}
 
     async def spawn(
         self,
@@ -57,7 +57,7 @@ class SubagentManager:
         label: Optional[str] = None,
         origin_channel: str = "cli",
         origin_chat_id: str = "direct",
-        session_key: Optional[str] = None,
+        session_id: Optional[str] = None,
     ) -> str:
         """Spawn a subagent to execute a task in the background."""
         task_id = str(uuid.uuid4())[:8]
@@ -66,15 +66,15 @@ class SubagentManager:
 
         bg_task = asyncio.create_task(self._run_subagent(task_id, task, display_label, origin))
         self._running_tasks[task_id] = bg_task
-        if session_key:
-            self._session_tasks.setdefault(session_key, set()).add(task_id)
+        if session_id:
+            self._session_tasks.setdefault(session_id, set()).add(task_id)
 
         def _cleanup(_: asyncio.Task) -> None:
             self._running_tasks.pop(task_id, None)
-            if session_key and (ids := self._session_tasks.get(session_key)):
+            if session_id and (ids := self._session_tasks.get(session_id)):
                 ids.discard(task_id)
                 if not ids:
-                    del self._session_tasks[session_key]
+                    del self._session_tasks[session_id]
 
         bg_task.add_done_callback(_cleanup)
 
@@ -210,6 +210,7 @@ Summarize this naturally for the user. Keep it brief (1-2 sentences). Do not men
 
         # Inject as system message to trigger main agent
         msg = InboundMessage(
+            session_id=f"{origin['channel']}:{origin['chat_id']}",
             channel="system",
             sender_id="subagent",
             chat_id=f"{origin['channel']}:{origin['chat_id']}",
@@ -247,11 +248,11 @@ Stay focused on the assigned task. Your final response will be reported back to 
 
         return "\n\n".join(parts)
 
-    async def cancel_by_session(self, session_key: str) -> int:
+    async def cancel_by_session(self, session_id: str) -> int:
         """Cancel all subagents for the given session. Returns count cancelled."""
         tasks = [
             self._running_tasks[tid]
-            for tid in self._session_tasks.get(session_key, [])
+            for tid in self._session_tasks.get(session_id, [])
             if tid in self._running_tasks and not self._running_tasks[tid].done()
         ]
         for t in tasks:

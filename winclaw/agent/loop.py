@@ -107,12 +107,12 @@ class AgentLoop:
         self._mcp_stack: Optional[AsyncExitStack] = None
         self._mcp_connected = False
         self._mcp_connecting = False
-        self._consolidating: set[str] = set()  # Session keys with consolidation in progress
+        self._consolidating: set[str] = set()  # Session IDs with consolidation in progress
         self._consolidation_tasks: set[asyncio.Task] = set()  # Strong refs to in-flight tasks
         self._consolidation_locks: weakref.WeakValueDictionary[str, asyncio.Lock] = (
             weakref.WeakValueDictionary()
         )
-        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_key -> tasks
+        self._active_tasks: dict[str, list[asyncio.Task]] = {}  # session_id -> tasks
         self._processing_lock = asyncio.Lock()
         self._register_default_tools()
 
@@ -296,9 +296,9 @@ class AgentLoop:
                 await self._handle_stop(msg)
             else:
                 task = asyncio.create_task(self._dispatch(msg))
-                self._active_tasks.setdefault(msg.session_key, []).append(task)
+                self._active_tasks.setdefault(msg.session_id, []).append(task)
                 task.add_done_callback(
-                    lambda t, k=msg.session_key: (
+                    lambda t, k=msg.session_id: (
                         self._active_tasks.get(k, []) and self._active_tasks[k].remove(t)
                         if t in self._active_tasks.get(k, [])
                         else None
@@ -307,18 +307,19 @@ class AgentLoop:
 
     async def _handle_stop(self, msg: InboundMessage) -> None:
         """Cancel all active tasks and subagents for the session."""
-        tasks = self._active_tasks.pop(msg.session_key, [])
+        tasks = self._active_tasks.pop(msg.session_id, [])
         cancelled = sum(1 for t in tasks if not t.done() and t.cancel())
         for t in tasks:
             try:
                 await t
             except (asyncio.CancelledError, Exception):
                 pass
-        sub_cancelled = await self.subagents.cancel_by_session(msg.session_key)
+        sub_cancelled = await self.subagents.cancel_by_session(msg.session_id)
         total = cancelled + sub_cancelled
         content = f"⏹ Stopped {total} task(s)." if total else "No active task to stop."
         await self.bus.publish_outbound(
             OutboundMessage(
+                session_id=msg.session_id,
                 channel=msg.channel,
                 chat_id=msg.chat_id,
                 content=content,
@@ -335,6 +336,7 @@ class AgentLoop:
                 elif msg.channel == "cli":
                     await self.bus.publish_outbound(
                         OutboundMessage(
+                            session_id=msg.session_id,
                             channel=msg.channel,
                             chat_id=msg.chat_id,
                             content="",
@@ -342,12 +344,13 @@ class AgentLoop:
                         )
                     )
             except asyncio.CancelledError:
-                logger.info("Task cancelled for session {}", msg.session_key)
+                logger.info("Task cancelled for session {}", msg.session_id)
                 raise
             except Exception:
-                logger.exception("Error processing message for session {}", msg.session_key)
+                logger.exception("Error processing message for session {}", msg.session_id)
                 await self.bus.publish_outbound(
                     OutboundMessage(
+                        session_id=msg.session_id,
                         channel=msg.channel,
                         chat_id=msg.chat_id,
                         content="Sorry, I encountered an error.",
@@ -380,8 +383,7 @@ class AgentLoop:
                 msg.chat_id.split(":", 1) if ":" in msg.chat_id else ("cli", msg.chat_id)
             )
             logger.info("Processing system message from {}", msg.sender_id)
-            key = f"{channel}:{chat_id}"
-            session = self.sessions.get_or_create(key)
+            session = self.sessions.get_or_create(msg.session_id)
             self._set_tool_context(channel, chat_id, msg.metadata.get("message_id"))
             history = session.get_history(max_messages=self.memory_window)
             messages = self.context.build_messages(
@@ -403,7 +405,7 @@ class AgentLoop:
         preview = msg.content[:80] + "..." if len(msg.content) > 80 else msg.content
         logger.info("Processing message from {}:{}: {}", msg.channel, msg.sender_id, preview)
 
-        session = self.sessions.get_or_create(msg.session_key)
+        session = self.sessions.get_or_create(msg.session_id)
 
         # Slash commands
         cmd = msg.content.strip().lower()
