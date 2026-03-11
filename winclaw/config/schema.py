@@ -164,7 +164,7 @@ class AgentDefaults(Base):
     )
     max_tokens: int = 8192
     temperature: float = 0.7
-    max_tool_iterations: int = 50
+    max_tool_iterations: int = 100
     memory_window: int = 100
     reasoning_effort: Optional[str] = None  # low / medium / high — enables LLM thinking mode
 

@@ -6,6 +6,25 @@ import pytest
 from winclaw.tools.web import WebFetchTool, WebSearchTool
 
 
+class MockTavilyClient:
+    def __init__(self, api_key=None, **kwargs):
+        self.api_key = api_key
+        self.kwargs = kwargs
+        self.calls = []
+
+    def search(self, **kwargs):
+        self.calls.append(kwargs)
+        return {
+            "results": [
+                {
+                    "title": "Result One",
+                    "url": "https://example.com/1",
+                    "content": "First result",
+                }
+            ]
+        }
+
+
 class MockAsyncClient:
     def __init__(self, response: httpx.Response, **kwargs):
         self.response = response
@@ -19,6 +38,10 @@ class MockAsyncClient:
         return False
 
     async def get(self, url, **kwargs):
+        self.calls.append((url, kwargs))
+        return self.response
+
+    async def post(self, url, **kwargs):
         self.calls.append((url, kwargs))
         return self.response
 
@@ -104,25 +127,8 @@ async def test_web_fetch_text_mode_supports_legacy_kwargs(monkeypatch):
 
 @pytest.mark.asyncio
 async def test_web_search_formats_results_and_clamps_count(monkeypatch):
-    payload = {
-        "web": {
-            "results": [
-                {
-                    "title": "Result One",
-                    "url": "https://example.com/1",
-                    "description": "First result",
-                }
-            ]
-        }
-    }
-    response = httpx.Response(
-        200,
-        headers={"content-type": "application/json"},
-        json=payload,
-        request=httpx.Request("GET", "https://api.search.brave.com/res/v1/web/search"),
-    )
-    client = MockAsyncClient(response)
-    monkeypatch.setattr("winclaw.tools.web.httpx.AsyncClient", lambda **kwargs: client)
+    client = MockTavilyClient()
+    monkeypatch.setattr("winclaw.tools.web.TavilyClient", lambda **kwargs: client)
 
     result = await WebSearchTool(api_key="token").execute("cursor", count=20)
 
@@ -130,4 +136,11 @@ async def test_web_search_formats_results_and_clamps_count(monkeypatch):
     assert "1. Result One" in result
     assert "https://example.com/1" in result
     assert "First result" in result
-    assert client.calls[0][1]["params"] == {"q": "cursor", "count": 10}
+    assert client.api_key == "token"
+    assert client.calls[0] == {
+        "query": "cursor",
+        "search_depth": "advanced",
+        "max_results": 10,
+        "include_answer": False,
+        "include_raw_content": False,
+    }

@@ -1,5 +1,6 @@
 """Web tools: web_search and web_fetch."""
 
+import asyncio
 import html
 import json
 import os
@@ -10,6 +11,7 @@ from urllib.parse import urlparse
 import httpx
 from loguru import logger
 from markdownify import markdownify as md
+from tavily import TavilyClient
 
 from winclaw.config.loader import get_config_path
 from winclaw.tools.base import Tool
@@ -59,7 +61,7 @@ def _validate_url(url: str) -> tuple[bool, str]:
 
 
 class WebSearchTool(Tool):
-    """Search the web using Brave Search API."""
+    """Search the web using Tavily Search API."""
 
     name = "web_search"
     description = "Search the web. Returns titles, URLs, and snippets."
@@ -75,43 +77,45 @@ class WebSearchTool(Tool):
     def __init__(
         self, api_key: Optional[str] = None, max_results: int = 5, proxy: Optional[str] = None
     ):
-        self._init_api_key = api_key
+        self._init_api_key = api_key or os.environ.get("TAVILY_API_KEY", "")
         self.max_results = max_results
         self.proxy = proxy
 
     @property
     def api_key(self) -> str:
         """Resolve API key at call time so env/config changes are picked up."""
-        return self._init_api_key or os.environ.get("BRAVE_API_KEY", "")
+        return self._init_api_key or os.environ.get("TAVILY_API_KEY", "")
 
     async def execute(self, query: str, count: Optional[int] = None, **kwargs: Any) -> str:
         if not self.api_key:
             return (
-                f"Error: Brave Search API key not configured. Set it in "
+                f"Error: Tavily API key not configured. Set it in "
                 f"{get_config_path()} under tools.web.search.apiKey "
-                "(or export BRAVE_API_KEY), then restart the gateway."
+                "(or export TAVILY_API_KEY), then restart the gateway."
             )
 
         try:
-            n = min(max(count or self.max_results, 1), 10)
-            logger.debug("WebSearch: {}", "proxy enabled" if self.proxy else "direct connection")
-            async with httpx.AsyncClient(proxy=self.proxy) as client:
-                r = await client.get(
-                    "https://api.search.brave.com/res/v1/web/search",
-                    params={"q": query, "count": n},
-                    headers={"Accept": "application/json", "X-Subscription-Token": self.api_key},
-                    timeout=10.0,
-                )
-                r.raise_for_status()
+            n = min(max(count or self.max_results, 1), 5)
+            if self.proxy:
+                logger.debug("WebSearch: Tavily client ignores tool-level proxy setting")
+            client = TavilyClient(api_key=self.api_key)
+            response = await asyncio.to_thread(
+                client.search,
+                query=query,
+                search_depth="advanced",
+                max_results=n,
+                include_answer=False,
+                include_raw_content=False,
+            )
 
-            results = r.json().get("web", {}).get("results", [])[:n]
+            results = response.get("results", [])[:n]
             if not results:
                 return f"No results for: {query}"
 
             lines = [f"Results for: {query}\n"]
             for i, item in enumerate(results, 1):
                 lines.append(f"{i}. {item.get('title', '')}\n   {item.get('url', '')}")
-                if desc := item.get("description"):
+                if desc := item.get("content"):
                     lines.append(f"   {desc}")
             return "\n".join(lines)
         except httpx.ProxyError as e:

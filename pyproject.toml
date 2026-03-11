@@ -30,6 +30,7 @@ dependencies = [
     "qq-botpy>=1.2.1",
     "ruff>=0.15.5",
     "sqlite-vec>=0.1.6",
+    "tavily>=1.1.0",
     "typer>=0.24.1",
     "websockets>=16.0",
 ]
