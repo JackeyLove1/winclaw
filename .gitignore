@@ -110,3 +110,6 @@ uv.lock
 # executable files
 *.exe
 python/
+
+# ruff
+.ruff_cache/
