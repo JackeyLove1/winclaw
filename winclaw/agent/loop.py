@@ -58,7 +58,7 @@ class AgentLoop:
         provider: LLMProvider,
         workspace: Path,
         model: Optional[str] = None,
-        max_iterations: int = 40,
+        max_iterations: int = 100,
         temperature: float = 0.1,
         max_tokens: int = 128 * 1024,
         memory_window: int = 100,

@@ -24,6 +24,7 @@ class SkillsLoader:
     def __init__(self, workspace: Path, builtin_skills_dir: Optional[Path] = None):
         self.workspace = workspace
         self.workspace_skills = workspace / "skills"
+        self.clawhub_skills = workspace / "workspace" / "skills"
         self.builtin_skills = builtin_skills_dir or BUILTIN_SKILLS_DIR
 
     def list_skills(self, filter_unavailable: bool = True) -> list[dict[str, str]]:
@@ -38,6 +39,16 @@ class SkillsLoader:
         """
         skills = []
 
+        # Built-in skills
+        if self.builtin_skills and self.builtin_skills.exists():
+            for skill_dir in self.builtin_skills.iterdir():
+                if skill_dir.is_dir():
+                    skill_file = skill_dir / "SKILL.md"
+                    if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
+                        skills.append(
+                            {"name": skill_dir.name, "path": str(skill_file), "source": "builtin"}
+                        )
+
         # Workspace skills (highest priority)
         if self.workspace_skills.exists():
             for skill_dir in self.workspace_skills.iterdir():
@@ -48,14 +59,14 @@ class SkillsLoader:
                             {"name": skill_dir.name, "path": str(skill_file), "source": "workspace"}
                         )
 
-        # Built-in skills
-        if self.builtin_skills and self.builtin_skills.exists():
-            for skill_dir in self.builtin_skills.iterdir():
+        # clawhub skills
+        if self.clawhub_skills and self.clawhub_skills.exists():
+            for skill_dir in self.clawhub_skills.iterdir():
                 if skill_dir.is_dir():
                     skill_file = skill_dir / "SKILL.md"
                     if skill_file.exists() and not any(s["name"] == skill_dir.name for s in skills):
                         skills.append(
-                            {"name": skill_dir.name, "path": str(skill_file), "source": "builtin"}
+                            {"name": skill_dir.name, "path": str(skill_file), "source": "clawhub"}
                         )
 
         # Filter by requirements
@@ -73,18 +84,25 @@ class SkillsLoader:
         Returns:
             Skill content or None if not found.
         """
-        # Check workspace first
-        workspace_skill = self.workspace_skills / name / "SKILL.md"
-        if workspace_skill.exists():
-            logger.info(f"Loading skill from workspace: {workspace_skill}")
-            return workspace_skill.read_text(encoding="utf-8")
 
-        # Check built-in
+        # Check built-in first
         if self.builtin_skills:
             builtin_skill = self.builtin_skills / name / "SKILL.md"
             if builtin_skill.exists():
                 logger.info(f"Loading skill from builtin: {builtin_skill}")
                 return builtin_skill.read_text(encoding="utf-8")
+
+        # Check workspace
+        workspace_skill = self.workspace_skills / name / "SKILL.md"
+        if workspace_skill.exists():
+            logger.info(f"Loading skill from workspace: {workspace_skill}")
+            return workspace_skill.read_text(encoding="utf-8")
+
+        # Check clawhub
+        workspace_skill = self.clawhub_skills / name / "SKILL.md"
+        if workspace_skill.exists():
+            logger.info(f"Loading skill from workspace: {workspace_skill}")
+            return workspace_skill.read_text(encoding="utf-8")
 
         return None
 

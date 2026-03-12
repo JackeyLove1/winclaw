@@ -1,6 +1,6 @@
 ---
 name: memory
-description: Two-layer memory system with grep-based recall.
+description: Two-layer memory system with rg-based recall.
 always: true
 ---
 
@@ -9,15 +9,15 @@ always: true
 ## Structure
 
 - `memory/MEMORY.md` — Long-term facts (preferences, project context, relationships). Always loaded into your context.
-- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with grep. Each entry starts with [YYYY-MM-DD HH:MM].
+- `memory/HISTORY.md` — Append-only event log. NOT loaded into context. Search it with rg tool. Each entry starts with [YYYY-MM-DD HH:MM].
 
 ## Search Past Events
 
 ```bash
-grep -i "keyword" memory/HISTORY.md
+rg -i "keyword" memory/HISTORY.md
 ```
 
-Use the `exec` tool to run grep. Combine patterns: `grep -iE "meeting|deadline" memory/HISTORY.md`
+Use the `exec` tool to run rg. Combine patterns: `rg -iE "meeting|deadline" memory/HISTORY.md`
 
 ## When to Update MEMORY.md
 

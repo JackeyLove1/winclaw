@@ -1,3 +1,4 @@
+# may need scan all user files to find wechat.exe
 function Find-WeChatExe {
     $searchDirs = @(
         "$env:ProgramFiles",
