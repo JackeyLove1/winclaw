@@ -1,6 +1,7 @@
 """
 File system tools: read, write, edit.
 TODO: disable filesystem tools by default, use powershell for more flexibility.
+TODO: support glob and rg
 """
 
 import difflib

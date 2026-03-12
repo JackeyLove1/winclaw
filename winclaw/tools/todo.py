@@ -3,6 +3,7 @@
 from enum import Enum
 from typing import Any
 
+from loguru import logger
 from pydantic import BaseModel, ValidationError
 
 from winclaw.tools.base import Tool
@@ -84,6 +85,7 @@ class TodoTool(Tool):
         return "\n".join(lines)
 
     async def execute(self, items: list[dict[str, Any]], **kwargs: Any) -> str:
+        logger.debug("Executing TodoTool with items: {}", items)
         try:
             updated_items: list[TodoItem] = [TodoItem.model_validate(item) for item in items]
             item_map = {item.id: item for item in self.todo_items}

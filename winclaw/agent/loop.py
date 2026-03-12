@@ -21,6 +21,7 @@ from winclaw.providers.base import LLMProvider
 from winclaw.session.manager import Session, SessionManager
 from winclaw.tools.cron import CronTool
 from winclaw.tools.mcp import connect_mcp_servers
+from winclaw.tools.media import ReadMediaTool
 from winclaw.tools.message import MessageTool
 from winclaw.tools.registry import ToolRegistry
 from winclaw.tools.shell import ExecTool
@@ -28,6 +29,7 @@ from winclaw.tools.spawn import SpawnTool
 from winclaw.tools.todo import TodoTool
 from winclaw.tools.web import WebFetchTool, WebSearchTool
 from winclaw.utils.helpers import get_new_session_id
+from winclaw.utils.media import detect_file_type
 
 if TYPE_CHECKING:
     from winclaw.config.schema import ChannelsConfig, ExecToolConfig
@@ -123,6 +125,7 @@ class AgentLoop:
         # allowed_dir = self.workspace if self.restrict_to_workspace else None
         # for cls in (ReadFileTool, WriteFileTool, EditFileTool, ListDirTool):
         #     self.tools.register(cls(workspace=self.workspace, allowed_dir=allowed_dir))
+        allowed_dir = self.workspace if self.restrict_to_workspace else None
         self.tools.register(
             ExecTool(
                 working_dir=str(self.workspace),
@@ -131,6 +134,7 @@ class AgentLoop:
                 path_append=self.exec_config.path_append,
             )
         )
+        self.tools.register(ReadMediaTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))
         # TODO: support message tool
@@ -261,6 +265,17 @@ class AgentLoop:
                     messages = self.context.add_tool_result(
                         messages, tool_call.id, tool_call.name, result
                     )
+                    if (
+                        tool_call.name == "read_media_file"
+                        and not result.startswith("Error")
+                        and isinstance(tool_call.arguments, dict)
+                        and isinstance(tool_call.arguments.get("path"), str)
+                    ):
+                        messages = self.context.add_media_tool_context(
+                            messages,
+                            tool_call.arguments["path"],
+                            tool_name=tool_call.name,
+                        )
             else:
                 clean = self._strip_think(response.content)
                 # Don't persist error responses to session history — they can
@@ -564,10 +579,28 @@ class AgentLoop:
                             and c["text"].startswith(ContextBuilder._RUNTIME_CONTEXT_TAG)
                         ):
                             continue  # Strip runtime context from multimodal messages
-                        if c.get("type") == "image_url" and c.get("image_url", {}).get(
-                            "url", ""
-                        ).startswith("data:image/"):
+                        if c.get("type") == "image_url":
                             filtered.append({"type": "text", "text": "[image]"})
+                        elif c.get("type") == "file":
+                            file_payload = c.get("file", {})
+                            filename = file_payload.get("filename") or file_payload.get(
+                                "file_url", ""
+                            )
+                            file_data = file_payload.get("file_data", "")
+                            placeholder = "[file]"
+                            if isinstance(file_data, str) and file_data.startswith("data:"):
+                                mime = file_data[5:].split(";", 1)[0]
+                                if mime.startswith("audio/"):
+                                    placeholder = "[audio]"
+                                elif mime.startswith("video/"):
+                                    placeholder = "[video]"
+                            else:
+                                file_type = detect_file_type(filename)
+                                if file_type.kind == "audio":
+                                    placeholder = "[audio]"
+                                elif file_type.kind == "video":
+                                    placeholder = "[video]"
+                            filtered.append({"type": "text", "text": placeholder})
                         else:
                             filtered.append(c)
                     if not filtered:

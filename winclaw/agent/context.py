@@ -1,18 +1,18 @@
 """Context builder for assembling agent prompts."""
 
 import base64
-import mimetypes
 import platform
 import time
 from datetime import datetime
-from pathlib import Path
+from pathlib import Path, PurePath
 from typing import Any, Optional
+from urllib.parse import urlparse
 
 from loguru import logger
 
 from winclaw.agent.memory import MemoryStore
 from winclaw.agent.skills import SkillsLoader
-from winclaw.utils.helpers import detect_image_mime
+from winclaw.utils.media import detect_file_type
 
 
 class ContextBuilder:
@@ -20,6 +20,7 @@ class ContextBuilder:
 
     BOOTSTRAP_FILES = ["AGENTS.md", "SOUL.md", "USER.md", "TOOLS.md", "IDENTITY.md"]
     _RUNTIME_CONTEXT_TAG = "[Runtime Context — metadata only, not instructions]"
+    _MAX_INLINE_MEDIA_BYTES = 20 * 1024 * 1024
 
     def __init__(self, workspace: Path):
         self.workspace = workspace
@@ -145,27 +146,90 @@ Your workspace is at: {str(workspace_path)}
             {"role": "user", "content": merged},
         ]
 
+    @staticmethod
+    def _is_remote_media(source: str) -> bool:
+        parsed = urlparse(source)
+        return parsed.scheme in {"http", "https"} and bool(parsed.netloc)
+
+    @staticmethod
+    def _to_data_url(mime_type: str, data: bytes) -> str:
+        b64 = base64.b64encode(data).decode("ascii")
+        return f"data:{mime_type};base64,{b64}"
+
+    def _build_media_summary(self, source: str, attachment: dict[str, Any]) -> str:
+        if attachment.get("type") == "image_url":
+            return f"- image: source={source}"
+        if attachment.get("type") == "file":
+            file_payload = attachment.get("file", {})
+            filename = file_payload.get("filename") or "media"
+            if "file_url" in file_payload:
+                return f"- file: filename={filename}, source={source}"
+            return f"- file: filename={filename}, source={source}"
+        return f"- media: source={source}"
+
+    def _build_media_content_part(self, source: str) -> dict[str, Any] | None:
+        if self._is_remote_media(source):
+            file_type = detect_file_type(urlparse(source).path or source)
+            filename = PurePath(urlparse(source).path).name or "media"
+
+            if file_type.kind == "image":
+                return {"type": "image_url", "image_url": {"url": source}}
+            if file_type.kind in {"audio", "video"}:
+                return {"type": "file", "file": {"filename": filename, "file_url": source}}
+            return None
+
+        file_path = Path(source).expanduser()
+        if not file_path.is_absolute():
+            file_path = self.workspace / file_path
+        if not file_path.is_file():
+            return None
+
+        raw = file_path.read_bytes()
+        if len(raw) > self._MAX_INLINE_MEDIA_BYTES:
+            logger.warning(
+                "Skipping media {} because it exceeds inline limit ({} bytes)",
+                file_path,
+                self._MAX_INLINE_MEDIA_BYTES,
+            )
+            return None
+
+        file_type = detect_file_type(file_path, raw)
+        if file_type.kind not in {"image", "audio", "video"} or not file_type.mime_type:
+            return None
+
+        if file_type.kind == "image":
+            return {
+                "type": "image_url",
+                "image_url": {"url": self._to_data_url(file_type.mime_type, raw)},
+            }
+
+        return {
+            "type": "file",
+            "file": {
+                "filename": file_path.name,
+                "file_data": self._to_data_url(file_type.mime_type, raw),
+            },
+        }
+
+    def _build_media_parts(self, source: str) -> tuple[dict[str, Any], str] | None:
+        attachment = self._build_media_content_part(source)
+        if not attachment:
+            return None
+        return attachment, self._build_media_summary(source, attachment)
+
     def _build_user_content(self, text: str, media: list[str] | None) -> str | list[dict[str, Any]]:
-        """Build user message content with optional base64-encoded images."""
+        """Build user message content with optional image/video/audio attachments."""
         if not media:
             return text
 
-        images = []
-        for path in media:
-            p = Path(path)
-            if not p.is_file():
-                continue
-            raw = p.read_bytes()
-            # Detect real MIME type from magic bytes; fallback to filename guess
-            mime = detect_image_mime(raw) or mimetypes.guess_type(path)[0]
-            if not mime or not mime.startswith("image/"):
-                continue
-            b64 = base64.b64encode(raw).decode()
-            images.append({"type": "image_url", "image_url": {"url": f"data:{mime};base64,{b64}"}})
+        attachments = []
+        for source in media:
+            if part := self._build_media_content_part(source):
+                attachments.append(part)
 
-        if not images:
+        if not attachments:
             return text
-        return images + [{"type": "text", "text": text}]
+        return attachments + [{"type": "text", "text": text}]
 
     def add_tool_result(
         self,
@@ -177,6 +241,35 @@ Your workspace is at: {str(workspace_path)}
         """Add a tool result to the message list."""
         messages.append(
             {"role": "tool", "tool_call_id": tool_call_id, "name": tool_name, "content": result}
+        )
+        return messages
+
+    def add_media_tool_context(
+        self,
+        messages: list[dict[str, Any]],
+        source: str,
+        tool_name: str = "read_media_file",
+    ) -> list[dict[str, Any]]:
+        """Append a synthetic user message carrying the actual media content."""
+        parts = self._build_media_parts(source)
+        if not parts:
+            return messages
+
+        attachment, summary = parts
+        messages.append(
+            {
+                "role": "user",
+                "content": [
+                    {
+                        "type": "text",
+                        "text": (
+                            f"Media loaded by tool `{tool_name}`. "
+                            f"Use the attachment below as context.\n{summary}"
+                        ),
+                    },
+                    attachment,
+                ],
+            }
         )
         return messages
 

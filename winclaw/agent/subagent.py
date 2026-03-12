@@ -13,6 +13,7 @@ from winclaw.bus.queue import MessageBus
 from winclaw.config.schema import ExecToolConfig
 from winclaw.providers.base import LLMProvider
 from winclaw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from winclaw.tools.media import ReadMediaTool
 from winclaw.tools.registry import ToolRegistry
 from winclaw.tools.shell import ExecTool
 from winclaw.tools.web import WebFetchTool, WebSearchTool
@@ -35,8 +36,6 @@ class SubagentManager:
         exec_config: "ExecToolConfig | None" = None,
         restrict_to_workspace: bool = False,
     ):
-        from winclaw.config.schema import ExecToolConfig
-
         self.provider = provider
         self.workspace = workspace
         self.bus = bus
@@ -99,6 +98,7 @@ class SubagentManager:
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            tools.register(ReadMediaTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(
                 ExecTool(
                     working_dir=str(self.workspace),
