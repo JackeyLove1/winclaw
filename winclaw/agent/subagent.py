@@ -12,7 +12,13 @@ from winclaw.bus.events import InboundMessage
 from winclaw.bus.queue import MessageBus
 from winclaw.config.schema import ExecToolConfig
 from winclaw.providers.base import LLMProvider
-from winclaw.tools.filesystem import EditFileTool, ListDirTool, ReadFileTool, WriteFileTool
+from winclaw.tools.filesystem import (
+    EditFileTool,
+    GrepTool,
+    ListDirTool,
+    ReadFileTool,
+    WriteFileTool,
+)
 from winclaw.tools.media import ReadMediaTool
 from winclaw.tools.registry import ToolRegistry
 from winclaw.tools.shell import ExecTool
@@ -98,6 +104,7 @@ class SubagentManager:
             tools.register(WriteFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(EditFileTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ListDirTool(workspace=self.workspace, allowed_dir=allowed_dir))
+            tools.register(GrepTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(ReadMediaTool(workspace=self.workspace, allowed_dir=allowed_dir))
             tools.register(
                 ExecTool(

@@ -1,4 +1,4 @@
-## ripgrep
+## ripgrep (integration with tool call)
 https://github.com/BurntSushi/ripgrep/releases
 
 ## ffmpeg

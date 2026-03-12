@@ -20,6 +20,7 @@ from winclaw.bus.queue import MessageBus
 from winclaw.providers.base import LLMProvider
 from winclaw.session.manager import Session, SessionManager
 from winclaw.tools.cron import CronTool
+from winclaw.tools.filesystem import GrepTool
 from winclaw.tools.mcp import connect_mcp_servers
 from winclaw.tools.media import ReadMediaTool
 from winclaw.tools.message import MessageTool
@@ -134,6 +135,7 @@ class AgentLoop:
                 path_append=self.exec_config.path_append,
             )
         )
+        self.tools.register(GrepTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(ReadMediaTool(workspace=self.workspace, allowed_dir=allowed_dir))
         self.tools.register(WebSearchTool(api_key=self.brave_api_key, proxy=self.web_proxy))
         self.tools.register(WebFetchTool(proxy=self.web_proxy))

@@ -1,6 +1,3 @@
-### rg / ripgrep
-- High-performance text search tool, suitable for quickly locating symbols, config keys, and error messages in large repositories.
-
 ### ffmpeg
 - General-purpose audio/video processing tool for transcoding, frame extraction, trimming, concatenation, audio extraction, and similar tasks.
 

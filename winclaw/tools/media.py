@@ -1,3 +1,4 @@
+# TODO: support more format file: pdf, word, excel, etc.
 from __future__ import annotations
 
 import base64
@@ -140,9 +141,7 @@ class ReadMediaTool(Tool):
             raise ValueError(f"Unsupported media URL: {url}")
 
         logger.debug("read_media: fetching remote URL: {}", url)
-        async with httpx.AsyncClient(
-            follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS
-        ) as client:
+        async with httpx.AsyncClient(follow_redirects=True, timeout=HTTP_TIMEOUT_SECONDS) as client:
             response = await client.get(url)
             response.raise_for_status()
 
@@ -206,9 +205,7 @@ class ReadMediaTool(Tool):
 
         parsed = urlparse(resolved_source) if source_kind == "url" else None
         filename = (
-            PurePath(parsed.path).name
-            if parsed and parsed.path
-            else Path(resolved_source).name
+            PurePath(parsed.path).name if parsed and parsed.path else Path(resolved_source).name
         ) or "media"
 
         payload: dict[str, Any] = {
