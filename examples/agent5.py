@@ -1,11 +1,12 @@
 """
-agent4: REPL + Anthropic tools + workspace tools + MCP + sub-agent task dispatcher
+agent5: REPL + Anthropic tools + workspace tools + MCP + task + fork dispatcher
 
 Overview
     - Parent agent keeps full chat history in the REPL session.
-    - Parent tools = CHILD_TOOLS + task.
-    - Child agent starts with fresh context, shares the same filesystem/tools,
-      and returns only a final summary to the parent.
+    - Parent tools = CHILD_TOOLS + task + fork.
+    - task: subagent with fresh context (same filesystem/tools), summary only.
+    - fork: subagent with a deep copy of parent history (excluding the pending
+      tool_use turn), so it inherits context; summary only returns to parent.
 
 Startup
     mcp.json --> load_mcp_tools_async() --> MCP tool wrappers
@@ -17,7 +18,7 @@ Startup
                               +------------+------------+
                               |                         |
                               v                         v
-                        subagent tools           parent task tool
+                        subagent tools      parent: task + fork
                                                       |
                                                       v
                                             TOOLS / TOOL_BY_NAME
@@ -25,40 +26,15 @@ Startup
 REPL
     stdin --> history --> agent_loop(history) --> print assistant text
 
-Parent agent_loop
-        +-------------+     client.messages.create(..., tools=TOOLS)
-        |   History   | ------------------------------+
-        +------+------+                                 |
-               |                                        v
-               |                                 +------+------+
-               |                                 | Parent LLM  |
-               |                                 |   content   |
-               |                                 +------+------+
-               |                    tool_use?      |            end_turn
-               |                         |           |            |
-               v                         v           v            v
-        +-------------+           +-----------+     |       (return)
-        | User turn   | <---------| Execute   |-----+
-        | tool_result |           | TOOL_BY_* |
-        +-------------+           +-----------+
-                                          |
-                         workspace / MCP / task subagent
-
-Task subagent flow
-    task(prompt)
-        --> run_subagent(prompt)
-        --> client.messages.create(..., tools=CHILD_TOOLS)
-        --> child tool loop with fresh sub_messages
-        --> final text summary only
-        --> returned to parent as tool_result
-
 Run
-    uv run python examples/agent4.py
+    uv run python examples/agent5.py
 """
 
 import asyncio
+import copy
 import os
 import subprocess
+from contextvars import ContextVar
 from pathlib import Path
 from typing import Any
 
@@ -90,13 +66,22 @@ print(f"WORK DIR: {WORKDIR}")
 SYSTEM = (
     f"You are a coding agent at {os.getcwd()}. Use bash and workspace tools to solve tasks. "
     "MCP tools from configured servers are prefixed SERVER_NAME__ (see tool list). "
-    "Use the task tool to delegate self-contained subtasks when helpful. Act, don't explain."
+    "Use task for isolated subtasks with fresh context; use fork when the subtask needs prior "
+    "conversation context. Act, don't explain."
 )
 SUBAGENT_SYSTEM = (
     f"You are a coding subagent at {WORKDIR}. You have fresh context and do not see the parent "
     "conversation history. Complete the delegated task with the provided tools, then return only a "
     "concise final summary for the parent agent."
 )
+FORK_SUBAGENT_SYSTEM = (
+    f"You are a forked coding subagent at {WORKDIR}. You see the parent's conversation history "
+    "before this branch. Use the tools to complete the instruction in the latest user message, "
+    "then reply with a concise summary for the main agent only (no meta narration)."
+)
+
+# Set in agent_loop before executing tool calls so fork can read the parent's message list.
+_parent_messages_ctx: ContextVar[list[Any] | None] = ContextVar("_parent_messages_ctx", default=None)
 
 
 def _safe_path(workdir: Path, p: str) -> Path:
@@ -389,6 +374,62 @@ async def run_subagent(prompt: str) -> str:
     return _response_text(response.content) or "(no summary)"
 
 
+def _fork_inherited_messages(parent_messages: list[Any]) -> list[Any]:
+    """Copy parent history for a new API call: drop the last assistant turn (pending tool_use)."""
+    if len(parent_messages) < 1:
+        return []
+    return copy.deepcopy(parent_messages[:-1])
+
+
+async def run_fork_agent(parent_messages: list[Any], prompt: str) -> str:
+    sub_messages: list[dict[str, Any]] = _fork_inherited_messages(parent_messages)
+    sub_messages.append(
+        {
+            "role": "user",
+            "content": (
+                "[Fork — you inherit the conversation above. Complete this branch; end with a concise "
+                "summary for the main agent.]\n\n" + prompt
+            ),
+        }
+    )
+    response = None
+
+    for _ in range(30):
+        response = client.messages.create(
+            model=MODEL,
+            system=FORK_SUBAGENT_SYSTEM,
+            messages=sub_messages,
+            tools=CHILD_TOOLS,
+            max_tokens=8000,
+        )
+        sub_messages.append({"role": "assistant", "content": response.content})
+        if response.stop_reason != "tool_use":
+            break
+
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                output = await _execute_tool_block(
+                    block,
+                    CHILD_TOOL_BY_NAME,
+                    log_prefix="[fork] ",
+                )
+                results.append(
+                    {
+                        "type": "tool_result",
+                        "tool_use_id": block.id,
+                        "content": output[:50000],
+                    }
+                )
+        sub_messages.append({"role": "user", "content": results})
+
+    if response is None:
+        return "(no summary)"
+    if response.stop_reason == "tool_use":
+        return "Fork agent stopped after reaching the tool loop safety limit."
+    return _response_text(response.content) or "(no summary)"
+
+
 class TaskTool(Tool):
     @property
     def name(self) -> str:
@@ -420,6 +461,46 @@ class TaskTool(Tool):
         return ToolResult(success=True, content=summary)
 
 
+class ForkTool(Tool):
+    @property
+    def name(self) -> str:
+        return "fork"
+
+    @property
+    def description(self) -> str:
+        return (
+            "Spawn a subagent that inherits the parent's chat history (through the last completed turn), "
+            "then follows your prompt. Use when the work needs prior decisions, paths, or errors from this "
+            "conversation. Same tools and workspace as the parent; no task/fork inside the fork. Returns a "
+            "summary only."
+        )
+
+    @property
+    def parameters(self) -> dict[str, Any]:
+        return {
+            "type": "object",
+            "properties": {
+                "prompt": {"type": "string"},
+                "description": {
+                    "type": "string",
+                    "description": "Short label for this fork (optional)",
+                },
+            },
+            "required": ["prompt"],
+        }
+
+    async def execute(self, *args: Any, **kwargs: Any) -> ToolResult:
+        parent = _parent_messages_ctx.get()
+        if parent is None:
+            return ToolResult(
+                success=False,
+                content="",
+                error="fork could not read parent messages (internal)",
+            )
+        summary = await run_fork_agent(parent, kwargs["prompt"])
+        return ToolResult(success=True, content=summary)
+
+
 _BASE_TOOLS: list[Tool] = [
     BashTool(WORKDIR),
     ReadFileTool(WORKDIR),
@@ -429,10 +510,15 @@ _BASE_TOOLS: list[Tool] = [
 # Filled when MCP servers connect (list_tools); keeps Tool instances alive for the session.
 MCP_TOOLS_CACHE: list[Tool] = []
 TASK_TOOL = TaskTool()
+FORK_TOOL = ForkTool()
 CHILD_TOOLS = [t.to_schema() for t in _BASE_TOOLS]
 CHILD_TOOL_BY_NAME: dict[str, Tool] = {t.name: t for t in _BASE_TOOLS}
-TOOLS = [*CHILD_TOOLS, TASK_TOOL.to_schema()]
-TOOL_BY_NAME: dict[str, Tool] = {**CHILD_TOOL_BY_NAME, TASK_TOOL.name: TASK_TOOL}
+TOOLS = [*CHILD_TOOLS, TASK_TOOL.to_schema(), FORK_TOOL.to_schema()]
+TOOL_BY_NAME: dict[str, Tool] = {
+    **CHILD_TOOL_BY_NAME,
+    TASK_TOOL.name: TASK_TOOL,
+    FORK_TOOL.name: FORK_TOOL,
+}
 
 
 def _tool_output_string(r: ToolResult) -> str:
@@ -457,6 +543,7 @@ async def agent_loop(messages: list) -> None:
         # If the model didn't call a tool, we're done
         if response.stop_reason != "tool_use":
             return
+        _parent_messages_ctx.set(messages)
         # Execute each tool call, collect results
         results = []
         for block in response.content:
@@ -478,8 +565,12 @@ def _register_all_tools(mcp_tools: list[Tool]) -> None:
     merged_child = _BASE_TOOLS + MCP_TOOLS_CACHE
     CHILD_TOOLS = [t.to_schema() for t in merged_child]
     CHILD_TOOL_BY_NAME = {t.name: t for t in merged_child}
-    TOOLS = [*CHILD_TOOLS, TASK_TOOL.to_schema()]
-    TOOL_BY_NAME = {**CHILD_TOOL_BY_NAME, TASK_TOOL.name: TASK_TOOL}
+    TOOLS = [*CHILD_TOOLS, TASK_TOOL.to_schema(), FORK_TOOL.to_schema()]
+    TOOL_BY_NAME = {
+        **CHILD_TOOL_BY_NAME,
+        TASK_TOOL.name: TASK_TOOL,
+        FORK_TOOL.name: FORK_TOOL,
+    }
 
 
 async def async_main() -> None:
@@ -490,7 +581,7 @@ async def async_main() -> None:
     try:
         while True:
             try:
-                query = input("\033[36magent4 >> \033[0m")
+                query = input("\033[36magent5 >> \033[0m")
             except (EOFError, KeyboardInterrupt):
                 break
             if query.strip().lower() in ("q", "exit", ""):
