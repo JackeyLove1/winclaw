@@ -113,3 +113,6 @@ python/
 
 # ruff
 .ruff_cache/
+
+# logs
+logs/
