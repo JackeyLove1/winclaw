@@ -1,35 +1,19 @@
 """
-agent10: agent loop + mcp + sub-agent + skills + context compaction + permission governance + Hook + memory system
+agent12: agent loop + mcp + sub-agent + skills + context compaction
+        + permission governance + Hook + memory system
+        + SystemPromptBuilder (sectioned system prompt + dynamic boundary)
+        + Error Recovery
 
-Use memory for:
-  - user preferences
-  - repeated user feedback
-  - project facts that are NOT obvious from the current code
-  - pointers to external resources
-
-Do NOT use memory for:
-  - code structure that can be re-read from the repo
-  - temporary task state
-  - secrets
-
-Storage layout:
-  .memory/
-    MEMORY.md
-    user.md
-    feedback.md
-    reference.md
-    project.md
-
-Each memory is a small Markdown file with frontmatter.
-The agent can save a memory through save_memory(), and the memory index
-is rebuilt after each write.
 
 Run
-    uv run python examples/agent10.py
+    uv run python examples/agent12.py
 """
+
+from __future__ import annotations
 
 import asyncio
 import copy
+import datetime
 import os
 from contextvars import ContextVar
 from pathlib import Path
@@ -51,6 +35,7 @@ from examples.constants import (
 from examples.hook import HookManager
 from examples.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async
 from examples.memory.memory_loader import create_memory_manager
+from examples.memory.memory_manager import MemoryManager
 from examples.memory.prompt import MEMORY_GUIDANCE
 from examples.permissions import MODES, PermissionManager
 from examples.skill_loader import SkillLoader
@@ -89,7 +74,6 @@ client = Anthropic(
 MODEL = os.environ["MODEL_ID"]
 FAST_MODEL = os.environ["FAST_MODEL_ID"]
 WORKDIR = get_work_dir(__file__)
-PLATFORM = get_platform()
 SKILLS_DIR = get_skill_dir()
 SKILL_LOADER = SkillLoader(SKILLS_DIR)
 MEMORY_MANAGER = create_memory_manager(WORKDIR)
@@ -101,37 +85,177 @@ if _perm_mode not in MODES:
 PERMISSION_MANAGER = PermissionManager(mode=_perm_mode)
 print(f"Permission mode: {_perm_mode}")
 
-_SYSTEM_SKILLS_BLOCK = (
-    f"Use load_skill to access specialized knowledge before tackling unfamiliar topics.\n\n"
-    f"Skills available:\n{SKILL_LOADER.get_descriptions()}"
-)
-SYSTEM_BASE = (
-    f"You are a coding agent at {WORKDIR} on {PLATFORM}. Use bash and workspace tools to solve tasks. "
-    "MCP tools from configured servers are prefixed SERVER_NAME__ (see tool list). "
+DYNAMIC_BOUNDARY = "=== DYNAMIC_BOUNDARY ==="
+
+
+class SystemPromptBuilder:
+    """
+    Assemble the system prompt from independent sections.
+
+    Each section has one source and one responsibility so the prompt stays
+    easier to reason about, test, and extend.
+    """
+
+    def __init__(
+        self,
+        workdir: Path,
+        skill_loader: SkillLoader,
+        memory_manager: MemoryManager,
+    ) -> None:
+        self.workdir = workdir
+        self._skill_loader = skill_loader
+        self._memory_manager = memory_manager
+
+    def _build_core(self, core: str) -> str:
+        return core.strip()
+
+    def _build_tool_listing(self, tools: list[dict[str, Any]]) -> str:
+        if not tools:
+            return ""
+        lines = ["# Available tools"]
+        for tool in tools:
+            props = tool.get("input_schema", {}).get("properties", {})
+            params = ", ".join(props.keys())
+            lines.append(f"- {tool['name']}({params}): {tool['description']}")
+        return "\n".join(lines)
+
+    def _build_skill_listing(self) -> str:
+        if not self._skill_loader.skills:
+            return ""
+        lines = ["# Available skills", "Use load_skill to load full skill bodies when needed."]
+        lines.append(self._skill_loader.get_descriptions())
+        return "\n".join(lines)
+
+    def _build_memory_section(self) -> str:
+        content = self._memory_manager.load_memory_prompt()
+        return content.strip() if content else ""
+
+    def _build_memory_guidance(self) -> str:
+        return "# When to save memories\n" + MEMORY_GUIDANCE.strip()
+
+    def _build_claude_md(self) -> str:
+        """
+        Load CLAUDE.md files in priority order (all are included):
+        1. ~/.claude/CLAUDE.md (user-global)
+        2. <workdir>/CLAUDE.md (workspace)
+        3. <cwd>/CLAUDE.md when cwd differs from workdir (directory-specific)
+        """
+        sources: list[tuple[str, str]] = []
+
+        user_claude = Path.home() / ".claude" / "CLAUDE.md"
+        if user_claude.exists():
+            sources.append(
+                ("user global (~/.claude/CLAUDE.md)", user_claude.read_text(encoding="utf-8"))
+            )
+
+        project_claude = self.workdir / "CLAUDE.md"
+        if project_claude.exists():
+            sources.append(("workspace (CLAUDE.md)", project_claude.read_text(encoding="utf-8")))
+
+        cwd = Path.cwd()
+        if cwd.resolve() != self.workdir.resolve():
+            subdir_claude = cwd / "CLAUDE.md"
+            if subdir_claude.exists():
+                label = f"subdir ({cwd.name}/CLAUDE.md)"
+                sources.append((label, subdir_claude.read_text(encoding="utf-8")))
+
+        if not sources:
+            return ""
+        parts = ["# CLAUDE.md instructions"]
+        for label, content in sources:
+            parts.append(f"## From {label}")
+            parts.append(content.strip())
+        return "\n\n".join(parts)
+
+    def _build_dynamic_context(self) -> str:
+        lines = [
+            f"Current date: {datetime.date.today().isoformat()}",
+            f"Working directory: {self.workdir}",
+            f"Model: {MODEL}",
+            f"Platform: {get_platform()}",
+        ]
+        return "# Dynamic context\n" + "\n".join(lines)
+
+    def build(self, core: str, tools: list[dict[str, Any]]) -> str:
+        """
+        Assemble the full system prompt. Static sections (before the boundary) are
+        separated from dynamic context so a production agent could cache the static
+        prefix across turns.
+        """
+        sections: list[str] = []
+
+        core_text = self._build_core(core)
+        if core_text:
+            sections.append(core_text)
+
+        tool_block = self._build_tool_listing(tools)
+        if tool_block:
+            sections.append(tool_block)
+
+        skills = self._build_skill_listing()
+        if skills:
+            sections.append(skills)
+
+        memory = self._build_memory_section()
+        if memory:
+            sections.append(memory)
+
+        guidance = self._build_memory_guidance()
+        if guidance:
+            sections.append(guidance)
+
+        claude_md = self._build_claude_md()
+        if claude_md:
+            sections.append(claude_md)
+
+        sections.append(DYNAMIC_BOUNDARY)
+
+        dynamic = self._build_dynamic_context()
+        if dynamic:
+            sections.append(dynamic)
+
+        return "\n\n".join(sections)
+
+
+def build_system_reminder(extra: str | None = None) -> dict[str, Any] | None:
+    """
+    Build a user-role message wrapping per-turn dynamic content.
+
+    Keeps short-lived reminders out of the long-lived system instructions.
+    """
+    parts: list[str] = []
+    if extra:
+        parts.append(extra)
+    if not parts:
+        return None
+    content = "<system-reminder>\n" + "\n".join(parts) + "\n</system-reminder>"
+    return {"role": "user", "content": content}
+
+
+SYSTEM_PROMPT_BUILDER = SystemPromptBuilder(WORKDIR, SKILL_LOADER, MEMORY_MANAGER)
+
+SYSTEM_CORE = (
+    f"You are a coding agent operating in {WORKDIR}.\n"
+    "Use bash and workspace tools to explore, read, write, and edit files.\n"
+    "MCP tools from configured servers are prefixed SERVER_NAME__ (see tool list).\n"
     "Use task for isolated subtasks with fresh context; use fork when the subtask needs prior "
-    "conversation context. Act, don't explain.\n\n" + _SYSTEM_SKILLS_BLOCK
+    "conversation context. Act, don't explain; verify by reading files rather than guessing."
 )
-SUBAGENT_SYSTEM_BASE = (
+SUBAGENT_CORE = (
     f"You are a coding subagent at {WORKDIR}. You have fresh context and do not see the parent "
     "conversation history. Complete the delegated task with the provided tools, then return only a "
-    "concise final summary for the parent agent.\n\n" + _SYSTEM_SKILLS_BLOCK
+    "concise final summary for the parent agent."
 )
-FORK_SUBAGENT_SYSTEM_BASE = (
+FORK_SUBAGENT_CORE = (
     f"You are a forked coding subagent at {WORKDIR}. You see the parent's conversation history "
     "before this branch. Use the tools to complete the instruction in the latest user message, "
-    "then reply with a concise summary for the main agent only (no meta narration).\n\n"
-    + _SYSTEM_SKILLS_BLOCK
+    "then reply with a concise summary for the main agent only (no meta narration)."
 )
 
 
-def _system_for_agent(base: str) -> str:
+def _system_for_agent(core: str, tools: list[dict[str, Any]]) -> str:
     """Rebuild each turn so new save_memory writes appear on the next model call."""
-    memory_section = MEMORY_MANAGER.load_memory_prompt()
-    parts = [base]
-    if memory_section:
-        parts.append(memory_section)
-    parts.append(MEMORY_GUIDANCE)
-    return "\n\n".join(parts)
+    return SYSTEM_PROMPT_BUILDER.build(core=core, tools=tools)
 
 
 # Set in agent_loop before executing tool calls so fork can read the parent's message list.
@@ -248,7 +372,7 @@ async def run_subagent(prompt: str) -> str:
         sub_messages = _prepare_messages(sub_messages)
         response = client.messages.create(
             model=MODEL,
-            system=_system_for_agent(SUBAGENT_SYSTEM_BASE),
+            system=_system_for_agent(SUBAGENT_CORE, CHILD_TOOLS),
             messages=sub_messages,
             tools=CHILD_TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -307,7 +431,7 @@ async def run_fork_agent(parent_messages: list[Any], prompt: str) -> str:
         sub_messages = _prepare_messages(sub_messages)
         response = client.messages.create(
             model=MODEL,
-            system=_system_for_agent(FORK_SUBAGENT_SYSTEM_BASE),
+            system=_system_for_agent(FORK_SUBAGENT_CORE, CHILD_TOOLS),
             messages=sub_messages,
             tools=CHILD_TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -365,7 +489,7 @@ async def agent_loop(messages: list) -> None:
         messages = _prepare_messages(messages)
         response = client.messages.create(
             model=MODEL,
-            system=_system_for_agent(SYSTEM_BASE),
+            system=_system_for_agent(SYSTEM_CORE, TOOLS),
             messages=messages,
             tools=TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -436,7 +560,7 @@ async def async_main() -> None:
     try:
         while True:
             try:
-                query = input("\033[36magent10 >> \033[0m")
+                query = input("\033[36magent12 >> \033[0m")
             except (EOFError, KeyboardInterrupt):
                 break
             if query.strip().lower() in ("q", "exit", ""):
