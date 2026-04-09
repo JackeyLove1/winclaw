@@ -16,7 +16,7 @@ MODES = ("default", "plan", "auto", "dangerous")
 READ_ONLY_TOOLS = {"read_file", "bash_readonly"}
 
 # Tools that modify state (aligned with examples/tools names)
-WRITE_TOOLS = {"write_file", "edit_file", "bash"}
+WRITE_TOOLS = {"write_file", "edit_file", "bash", "save_memory"}
 
 
 # -- Bash security validation --

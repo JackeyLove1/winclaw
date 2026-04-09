@@ -6,6 +6,7 @@ from examples.tools.FileReadTool import FileReadTool
 from examples.tools.FileWriteTool import FileWriteTool
 from examples.tools.ForkTool import ForkTool
 from examples.tools.LoadSkillTool import LoadSkillTool
+from examples.tools.SaveMemoryTool import SaveMemoryTool
 from examples.tools.TaskTool import TaskTool
 
 __all__ = [
@@ -15,6 +16,7 @@ __all__ = [
     "FileWriteTool",
     "ForkTool",
     "LoadSkillTool",
+    "SaveMemoryTool",
     "TaskTool",
 ]
 

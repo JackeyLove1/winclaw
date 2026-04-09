@@ -49,6 +49,8 @@ from examples.constants import (
 )
 from examples.hook import HookManager
 from examples.mcp_loader import cleanup_mcp_connections, load_mcp_tools_async
+from examples.memory.memory_loader import create_memory_manager
+from examples.memory.prompt import MEMORY_GUIDANCE
 from examples.permissions import MODES, PermissionManager
 from examples.skill_loader import SkillLoader
 from examples.tools import (
@@ -58,6 +60,7 @@ from examples.tools import (
     FileWriteTool,
     ForkTool,
     LoadSkillTool,
+    SaveMemoryTool,
     TaskTool,
 )
 from examples.utils import (
@@ -88,6 +91,7 @@ WORKDIR = get_work_dir(__file__)
 PLATFORM = get_platform()
 SKILLS_DIR = get_skill_dir()
 SKILL_LOADER = SkillLoader(SKILLS_DIR)
+MEMORY_MANAGER = create_memory_manager(WORKDIR)
 print(f"WORK DIR: {WORKDIR}")
 
 _perm_mode = os.getenv("WINCLAW_PERMISSION_MODE", "dangerous").strip().lower()
@@ -100,23 +104,33 @@ _SYSTEM_SKILLS_BLOCK = (
     f"Use load_skill to access specialized knowledge before tackling unfamiliar topics.\n\n"
     f"Skills available:\n{SKILL_LOADER.get_descriptions()}"
 )
-SYSTEM = (
+SYSTEM_BASE = (
     f"You are a coding agent at {WORKDIR} on {PLATFORM}. Use bash and workspace tools to solve tasks. "
     "MCP tools from configured servers are prefixed SERVER_NAME__ (see tool list). "
     "Use task for isolated subtasks with fresh context; use fork when the subtask needs prior "
     "conversation context. Act, don't explain.\n\n" + _SYSTEM_SKILLS_BLOCK
 )
-SUBAGENT_SYSTEM = (
+SUBAGENT_SYSTEM_BASE = (
     f"You are a coding subagent at {WORKDIR}. You have fresh context and do not see the parent "
     "conversation history. Complete the delegated task with the provided tools, then return only a "
     "concise final summary for the parent agent.\n\n" + _SYSTEM_SKILLS_BLOCK
 )
-FORK_SUBAGENT_SYSTEM = (
+FORK_SUBAGENT_SYSTEM_BASE = (
     f"You are a forked coding subagent at {WORKDIR}. You see the parent's conversation history "
     "before this branch. Use the tools to complete the instruction in the latest user message, "
     "then reply with a concise summary for the main agent only (no meta narration).\n\n"
     + _SYSTEM_SKILLS_BLOCK
 )
+
+
+def _system_for_agent(base: str) -> str:
+    """Rebuild each turn so new save_memory writes appear on the next model call."""
+    memory_section = MEMORY_MANAGER.load_memory_prompt()
+    parts = [base]
+    if memory_section:
+        parts.append(memory_section)
+    parts.append(MEMORY_GUIDANCE)
+    return "\n\n".join(parts)
 
 # Set in agent_loop before executing tool calls so fork can read the parent's message list.
 _parent_messages_ctx: ContextVar[list[Any] | None] = ContextVar(
@@ -133,6 +147,7 @@ _BASE_TOOLS: list[Tool] = [
     FileWriteTool(WORKDIR),
     FileEditTool(WORKDIR),
     LoadSkillTool(SKILL_LOADER),
+    SaveMemoryTool(MEMORY_MANAGER),
 ]
 # Filled when MCP servers connect (list_tools); keeps Tool instances alive for the session.
 MCP_TOOLS_CACHE: list[Tool] = []
@@ -231,7 +246,7 @@ async def run_subagent(prompt: str) -> str:
         sub_messages = _prepare_messages(sub_messages)
         response = client.messages.create(
             model=MODEL,
-            system=SUBAGENT_SYSTEM,
+            system=_system_for_agent(SUBAGENT_SYSTEM_BASE),
             messages=sub_messages,
             tools=CHILD_TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -290,7 +305,7 @@ async def run_fork_agent(parent_messages: list[Any], prompt: str) -> str:
         sub_messages = _prepare_messages(sub_messages)
         response = client.messages.create(
             model=MODEL,
-            system=FORK_SUBAGENT_SYSTEM,
+            system=_system_for_agent(FORK_SUBAGENT_SYSTEM_BASE),
             messages=sub_messages,
             tools=CHILD_TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -348,7 +363,7 @@ async def agent_loop(messages: list) -> None:
         messages = _prepare_messages(messages)
         response = client.messages.create(
             model=MODEL,
-            system=SYSTEM,
+            system=_system_for_agent(SYSTEM_BASE),
             messages=messages,
             tools=TOOLS,
             max_tokens=MESSAGES_MAX_TOKENS,
@@ -404,6 +419,11 @@ async def async_main() -> None:
     global HOOK_MANAGER
     mcp_tools = await _init_mcp_tools()
     _register_all_tools(mcp_tools)
+    await asyncio.to_thread(MEMORY_MANAGER.load_all)
+    if MEMORY_MANAGER.memories:
+        print(f"[{len(MEMORY_MANAGER.memories)} memories loaded into context]")
+    else:
+        print("[No existing memories. The agent can create them with save_memory.]")
     HOOK_MANAGER = HookManager(WORKDIR)
     await asyncio.to_thread(
         HOOK_MANAGER.run_hooks,
@@ -419,6 +439,13 @@ async def async_main() -> None:
                 break
             if query.strip().lower() in ("q", "exit", ""):
                 break
+            if query.strip() == "/memories":
+                if MEMORY_MANAGER.memories:
+                    for name, mem in MEMORY_MANAGER.memories.items():
+                        print(f"  [{mem['type']}] {name}: {mem['description']}")
+                else:
+                    print("  (no memories)")
+                continue
             history.append({"role": "user", "content": query})
             await agent_loop(history)
             response_content = history[-1]["content"]
