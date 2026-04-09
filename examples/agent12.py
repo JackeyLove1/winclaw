@@ -30,6 +30,7 @@ from examples.constants import (
     CONSOLE_TOOL_OUTPUT_MAX_CHARS,
     CONTEXT_LIMIT,
     MESSAGES_MAX_TOKENS,
+    PERSIST_THRESHOLD,
     SUBAGENT_TOOL_LOOP_MAX,
 )
 from examples.hook import HookManager
@@ -38,6 +39,12 @@ from examples.memory.memory_loader import create_memory_manager
 from examples.memory.memory_manager import MemoryManager
 from examples.memory.prompt import MEMORY_GUIDANCE
 from examples.permissions import MODES, PermissionManager
+from examples.recovery import (
+    CONTINUATION_MESSAGE,
+    MAX_OUTPUT_RECOVERY_ATTEMPTS,
+    POST_TOOL_TOKEN_THRESHOLD,
+    create_messages_resilient,
+)
 from examples.skill_loader import SkillLoader
 from examples.tools import (
     BashTool,
@@ -51,9 +58,11 @@ from examples.tools import (
 )
 from examples.utils import (
     estimate_context_usage,
+    estimate_tokens,
     get_platform,
     get_skill_dir,
     get_work_dir,
+    persist_large_output,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -351,8 +360,14 @@ async def _execute_tool_block(
     if agent_tool is None:
         output = f"Error: unknown tool {block.name}"
     else:
-        tool_result = await agent_tool.execute(**inp, tool_use_id=block.id)
-        output = _tool_output_string(tool_result)
+        try:
+            tool_result = await agent_tool.execute(**inp, tool_use_id=block.id)
+            output = _tool_output_string(tool_result)
+        except Exception as e:
+            output = f"Error: tool execution failed: {e!s}"
+
+    if len(output) > PERSIST_THRESHOLD:
+        output = persist_large_output(block.id, output)
 
     if hook_manager is not None:
         ctx["tool_output"] = output
@@ -367,17 +382,33 @@ async def _execute_tool_block(
 async def run_subagent(prompt: str) -> str:
     sub_messages: list[dict[str, Any]] = [{"role": "user", "content": prompt}]
     response = None
+    max_output_recovery_count = 0
 
     for _ in range(SUBAGENT_TOOL_LOOP_MAX):
         sub_messages = _prepare_messages(sub_messages)
-        response = client.messages.create(
-            model=MODEL,
-            system=_system_for_agent(SUBAGENT_CORE, CHILD_TOOLS),
+        response = await create_messages_resilient(
+            client,
             messages=sub_messages,
+            system=_system_for_agent(SUBAGENT_CORE, CHILD_TOOLS),
             tools=CHILD_TOOLS,
+            model=MODEL,
             max_tokens=MESSAGES_MAX_TOKENS,
         )
         sub_messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "max_tokens":
+            max_output_recovery_count += 1
+            if max_output_recovery_count <= MAX_OUTPUT_RECOVERY_ATTEMPTS:
+                print(
+                    f"[subagent recovery] max_tokens "
+                    f"({max_output_recovery_count}/{MAX_OUTPUT_RECOVERY_ATTEMPTS})"
+                )
+                sub_messages.append({"role": "user", "content": CONTINUATION_MESSAGE})
+                continue
+            return "Subagent stopped: max_tokens recovery exhausted."
+
+        max_output_recovery_count = 0
+
         if response.stop_reason != "tool_use":
             break
 
@@ -399,6 +430,18 @@ async def run_subagent(prompt: str) -> str:
                     }
                 )
         sub_messages.append({"role": "user", "content": results})
+        if estimate_tokens(sub_messages) > POST_TOOL_TOKEN_THRESHOLD:
+            print("[subagent recovery] Post-tool token estimate high; compacting…")
+            try:
+                compacted = await asyncio.to_thread(
+                    summary_messages,
+                    sub_messages,
+                    client=client,
+                    model=MODEL,
+                )
+                sub_messages[:] = micro_compact(compacted)
+            except Exception as e:
+                print(f"[subagent recovery] Compaction failed: {e}")
 
     if response is None:
         return "(no summary)"
@@ -426,17 +469,33 @@ async def run_fork_agent(parent_messages: list[Any], prompt: str) -> str:
         }
     )
     response = None
+    max_output_recovery_count = 0
 
     for _ in range(SUBAGENT_TOOL_LOOP_MAX):
         sub_messages = _prepare_messages(sub_messages)
-        response = client.messages.create(
-            model=MODEL,
-            system=_system_for_agent(FORK_SUBAGENT_CORE, CHILD_TOOLS),
+        response = await create_messages_resilient(
+            client,
             messages=sub_messages,
+            system=_system_for_agent(FORK_SUBAGENT_CORE, CHILD_TOOLS),
             tools=CHILD_TOOLS,
+            model=MODEL,
             max_tokens=MESSAGES_MAX_TOKENS,
         )
         sub_messages.append({"role": "assistant", "content": response.content})
+
+        if response.stop_reason == "max_tokens":
+            max_output_recovery_count += 1
+            if max_output_recovery_count <= MAX_OUTPUT_RECOVERY_ATTEMPTS:
+                print(
+                    f"[fork recovery] max_tokens "
+                    f"({max_output_recovery_count}/{MAX_OUTPUT_RECOVERY_ATTEMPTS})"
+                )
+                sub_messages.append({"role": "user", "content": CONTINUATION_MESSAGE})
+                continue
+            return "Fork agent stopped: max_tokens recovery exhausted."
+
+        max_output_recovery_count = 0
+
         if response.stop_reason != "tool_use":
             break
 
@@ -458,6 +517,18 @@ async def run_fork_agent(parent_messages: list[Any], prompt: str) -> str:
                     }
                 )
         sub_messages.append({"role": "user", "content": results})
+        if estimate_tokens(sub_messages) > POST_TOOL_TOKEN_THRESHOLD:
+            print("[fork recovery] Post-tool token estimate high; compacting…")
+            try:
+                compacted = await asyncio.to_thread(
+                    summary_messages,
+                    sub_messages,
+                    client=client,
+                    model=MODEL,
+                )
+                sub_messages[:] = micro_compact(compacted)
+            except Exception as e:
+                print(f"[fork recovery] Compaction failed: {e}")
 
     if response is None:
         return "(no summary)"
@@ -485,22 +556,38 @@ def _tool_output_string(r: ToolResult) -> str:
 # -- The core pattern: a while loop that calls tools until the model stops --
 # Use async execution so MCP ClientSession stays on the same event loop as connect().
 async def agent_loop(messages: list) -> None:
+    max_output_recovery_count = 0
     while True:
         messages = _prepare_messages(messages)
-        response = client.messages.create(
-            model=MODEL,
-            system=_system_for_agent(SYSTEM_CORE, TOOLS),
+        response = await create_messages_resilient(
+            client,
             messages=messages,
+            system=_system_for_agent(SYSTEM_CORE, TOOLS),
             tools=TOOLS,
+            model=MODEL,
             max_tokens=MESSAGES_MAX_TOKENS,
         )
-        # Append assistant turn
         messages.append({"role": "assistant", "content": response.content})
-        # If the model didn't call a tool, we're done
+
+        if response.stop_reason == "max_tokens":
+            max_output_recovery_count += 1
+            if max_output_recovery_count <= MAX_OUTPUT_RECOVERY_ATTEMPTS:
+                print(
+                    f"[Recovery] max_tokens ({max_output_recovery_count}/"
+                    f"{MAX_OUTPUT_RECOVERY_ATTEMPTS}). Injecting continuation…"
+                )
+                messages.append({"role": "user", "content": CONTINUATION_MESSAGE})
+                continue
+            print(
+                f"[Error] max_tokens recovery exhausted ({MAX_OUTPUT_RECOVERY_ATTEMPTS})."
+            )
+            return
+
+        max_output_recovery_count = 0
+
         if response.stop_reason != "tool_use":
             return
         _parent_messages_ctx.set(messages)
-        # Execute each tool call, collect results
         results = []
         for block in response.content:
             if block.type == "tool_use":
@@ -518,6 +605,18 @@ async def agent_loop(messages: list) -> None:
                     }
                 )
         messages.append({"role": "user", "content": results})
+        if estimate_tokens(messages) > POST_TOOL_TOKEN_THRESHOLD:
+            print("[Recovery] Token estimate exceeds threshold after tools. Auto-compacting…")
+            try:
+                compacted = await asyncio.to_thread(
+                    summary_messages,
+                    messages,
+                    client=client,
+                    model=MODEL,
+                )
+                messages[:] = micro_compact(compacted)
+            except Exception as e:
+                print(f"[Recovery] Post-tool compaction failed: {e}")
 
 
 async def _init_mcp_tools() -> list[Tool]:
