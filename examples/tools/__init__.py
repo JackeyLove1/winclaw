@@ -1,6 +1,7 @@
 """Agent tool implementations for examples (agent7 and similar)."""
 
 from examples.tools.BashTool import BashTool
+from examples.tools.CronTool import CronTool
 from examples.tools.FileEditTool import FileEditTool
 from examples.tools.FileReadTool import FileReadTool
 from examples.tools.FileWriteTool import FileWriteTool
@@ -18,6 +19,7 @@ from examples.tools.task_tools import (
 
 __all__ = [
     "BashTool",
+    "CronTool",
     "FileEditTool",
     "FileReadTool",
     "FileWriteTool",

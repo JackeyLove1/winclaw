@@ -8,6 +8,8 @@ import re
 from pathlib import Path
 from typing import Any
 
+from examples.interactive import prompt_async
+
 # -- Permission modes --
 # ``dangerous``: only shell validators (bash/ps) gate ``bash``; all other tools and
 # rule-based deny/ask paths auto-allow. Use with care.
@@ -221,6 +223,25 @@ class PermissionManager:
             answer = input("  Allow? (y/n/always): ").strip().lower()
         except (EOFError, KeyboardInterrupt):
             return False
+
+        return self._apply_user_answer(tool_name, answer)
+
+    async def ask_user_async(self, tool_name: str, tool_input: dict[str, Any]) -> bool:
+        """Async interactive approval for agents already running an event loop."""
+        preview = json.dumps(tool_input, ensure_ascii=False)[:200]
+        print(f"\n  [Permission] {tool_name}: {preview}")
+        try:
+            answer = await prompt_async(
+                "<b fg='ansiyellow'>Allow?</b> (y/n/always): ",
+                "  Allow? (y/n/always): ",
+            )
+        except KeyboardInterrupt:
+            return False
+
+        return self._apply_user_answer(tool_name, answer)
+
+    def _apply_user_answer(self, tool_name: str, answer: str) -> bool:
+        answer = answer.strip().lower()
 
         if answer == "always":
             self.rules.append({"tool": tool_name, "path": "*", "behavior": "allow"})

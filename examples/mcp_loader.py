@@ -2,6 +2,7 @@
 
 import asyncio
 import json
+import logging
 from contextlib import AsyncExitStack
 from dataclasses import dataclass
 from pathlib import Path
@@ -13,6 +14,10 @@ from mcp.client.stdio import stdio_client
 from mcp.client.streamable_http import streamablehttp_client
 
 from .base import Tool, ToolResult
+
+# streamable_http may log large internal traceback (e.g. "Error in post_writer")
+# for transient network failures we already handle gracefully in connect().
+logging.getLogger("mcp.client.streamable_http").setLevel(logging.CRITICAL)
 
 # Connection type aliases
 ConnectionType = Literal["stdio", "sse", "http", "streamable_http"]
@@ -176,6 +181,23 @@ class MCPServerConnection:
         """Get effective execute timeout."""
         return self.execute_timeout or _default_timeout_config.execute_timeout
 
+    async def _safe_close_exit_stack(self) -> None:
+        """
+        Close AsyncExitStack defensively.
+
+        Some transports (notably streamable_http/anyio task groups) can raise
+        runtime errors during cancellation/timeout races on shutdown.
+        """
+        if not self.exit_stack:
+            return
+        try:
+            await self.exit_stack.aclose()
+        except Exception:
+            pass
+        finally:
+            self.exit_stack = None
+            self.session = None
+
     async def connect(self) -> bool:
         """Connect to the MCP server with timeout protection."""
         connect_timeout = self._get_connect_timeout()
@@ -222,7 +244,7 @@ class MCPServerConnection:
 
             conn_info = self.url if self.url else self.command
             print(
-                f"✓ Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools"
+                f"[OK] Connected to MCP server '{self.name}' ({self.connection_type}: {conn_info}) - loaded {len(self.tools)} tools"
             )
             for tool in self.tools:
                 desc = tool.description[:60] if len(tool.description) > 60 else tool.description
@@ -230,20 +252,25 @@ class MCPServerConnection:
             return True
 
         except TimeoutError:
-            print(f"✗ Connection to MCP server '{self.name}' timed out after {connect_timeout}s")
-            if self.exit_stack:
-                await self.exit_stack.aclose()
-                self.exit_stack = None
+            print(f"[WARN] Connection to MCP server '{self.name}' timed out after {connect_timeout}s")
+            await self._safe_close_exit_stack()
+            return False
+
+        except asyncio.CancelledError as e:
+            print(
+                f"[WARN] Failed to connect to MCP server '{self.name}': "
+                f"{e.__class__.__name__} (likely transient cancellation during handshake)"
+            )
+            await self._safe_close_exit_stack()
             return False
 
         except Exception as e:
-            print(f"✗ Failed to connect to MCP server '{self.name}': {e}")
-            if self.exit_stack:
-                await self.exit_stack.aclose()
-                self.exit_stack = None
-            import traceback
-
-            traceback.print_exc()
+            err_text = str(e).strip() or e.__class__.__name__
+            print(
+                f"[WARN] Failed to connect to MCP server '{self.name}': "
+                f"{err_text} (likely network/proxy/TLS issue)"
+            )
+            await self._safe_close_exit_stack()
             return False
 
     async def _connect_stdio(self):
@@ -285,17 +312,7 @@ class MCPServerConnection:
 
     async def disconnect(self):
         """Properly disconnect from the MCP server."""
-        if self.exit_stack:
-            try:
-                await self.exit_stack.aclose()
-            except Exception:
-                # anyio cancel scope may raise RuntimeError or ExceptionGroup
-                # when stdio_client's task group is closed from a different
-                # task context during shutdown.
-                pass
-            finally:
-                self.exit_stack = None
-                self.session = None
+        await self._safe_close_exit_stack()
 
 
 # Global connections registry
@@ -424,7 +441,13 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
                 execute_timeout=server_config.get("execute_timeout"),
                 sse_read_timeout=server_config.get("sse_read_timeout"),
             )
-            success = await connection.connect()
+            try:
+                success = await connection.connect()
+            except asyncio.CancelledError:
+                print(
+                    f"[WARN] MCP server '{server_name}' init cancelled, skipping this server"
+                )
+                success = False
 
             if success:
                 _mcp_connections.append(connection)
@@ -436,9 +459,6 @@ async def load_mcp_tools_async(config_path: str = "mcp.json") -> list[Tool]:
 
     except Exception as e:
         print(f"Error loading MCP config: {e}")
-        import traceback
-
-        traceback.print_exc()
         return []
 
 

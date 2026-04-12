@@ -122,3 +122,7 @@ logs/
 .tasks/
 .claude/settings*
 .mcp.json
+.cron
+.agents
+.team
+.tools
